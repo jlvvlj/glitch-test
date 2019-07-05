@@ -1,0 +1,94 @@
+const express = require('express');
+const compression = require('compression');
+const constants = require('./constants');
+const moduleAlias = require('module-alias');
+
+moduleAlias.addAliases(require('../shared/aliases'));
+
+const sentryHelpers = require('Shared/sentryHelpers');
+
+// https://docs.sentry.io/error-reporting/quickstart/?platform=node
+const Sentry = require('@sentry/node');
+
+try {
+  Sentry.init({
+    dsn: 'https://4f1a68242b6944738df12eecc34d377c@sentry.io/1246508',
+    environment: process.env.NODE_ENV || 'dev',
+    beforeSend(event) {
+      try {
+        return sentryHelpers.beforeSend(process.env.PROJECT_DOMAIN, constants.currentEnv, event);
+      } catch (error) {
+        console.error(error);
+        return event;
+      }
+    },
+    beforeBreadcrumb(breadcrumb) {
+      try {
+        return sentryHelpers.beforeBreadcrumb(breadcrumb);
+      } catch (error) {
+        console.error(error);
+        return breadcrumb;
+      }
+    },
+  });
+  Sentry.configureScope((scope) => {
+    scope.setTag('PROJECT_DOMAIN', process.env.PROJECT_DOMAIN);
+  });
+  // Node doesn't log unhandled promise errors if something is listening for
+  // them, which Sentry does. Add our own event listener to keep them logged
+  // https://github.com/getsentry/sentry-javascript/issues/1909
+  process.on('unhandledRejection', (reason) => {
+    console.error('Unhandled Rejection:', reason);
+    process.exit(1);
+  });
+} catch (error) {
+  console.error('Failed to initialize Sentry!', error);
+}
+
+// Extend dayjs with our conversion plugin
+require('dayjs').extend(require('../shared/dayjs-convert'));
+
+const app = express();
+const port = process.env.PORT || 3000
+app.enable('trust proxy');
+app.listen(port, () => {
+  console.log(`Your app is listening on port ${port} `);
+});
+
+app.use(Sentry.Handlers.requestHandler());
+
+// Accept JSON as req.body
+const bodyParser = require('body-parser');
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
+app.use(compression());
+
+app.get('/edit', function(req, res) {
+  res.status(500);
+  res.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.send('Sorry, no editor for remixes!');
+});
+
+const redirects = require('./redirects');
+redirects(app);
+
+const proxy = require('./proxy');
+const proxied = proxy(app);
+
+const logger = require('./logger');
+app.use(logger);
+
+const router = require('./routes');
+app.use('/', router(['/edit', ...proxied]));
+
+// Add an explicit no-cache to 404 responses
+// Since this is the last handler it will only be hit when all other handlers miss
+app.use(function(req, res, next) {
+  res.header('Cache-Control', 'no-cache, no-store, must-revalidate');
+  return next();
+});
+
+app.use(Sentry.Handlers.errorHandler());
+
+// Listen on App port
+
